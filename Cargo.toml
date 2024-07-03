@@ -47,6 +47,10 @@ package = "crossbeam-pebr-epoch"
 git = "https://github.com/kaist-cp/crossbeam"
 branch = "pebr"
 
+[dependencies.atomic-arc]
+package = "atomic-arc"
+path = "wait-free-atomic-shared-pointer/rust"
+
 [profile.release]
 lto = true
 codegen-units = 1

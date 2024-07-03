@@ -1,3 +1,4 @@
+pub mod atomic_arc;
 pub mod cdrc;
 pub mod circ_ebr;
 pub mod circ_hp;
