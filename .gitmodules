@@ -1,0 +1,4 @@
+[submodule "wait-free-atomic-shared-pointer"]
+	path = wait-free-atomic-shared-pointer
+	url = https://github.com/powergee/wait-free-atomic-shared-pointer.git
+	branch = tagged-test
