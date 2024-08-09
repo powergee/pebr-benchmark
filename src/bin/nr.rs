@@ -6,13 +6,18 @@ use std::path::Path;
 use std::sync::{mpsc, Arc, Barrier};
 use std::thread::available_parallelism;
 use std::time::Instant;
+use bdwgc_alloc::Allocator;
 
 use smr_benchmark::config::map::{setup, BenchWriter, Config, Op, Perf, DS};
 use smr_benchmark::ds_impl::nr::{
     BonsaiTreeMap, ConcurrentMap, EFRBTree, HHSList, HList, HMList, HashMap, NMTreeMap, SkipList,
 };
 
+#[global_allocator]
+static GLOBAL_ALLOCATOR: Allocator = Allocator;
+
 fn main() {
+    unsafe { Allocator::initialize() };
     let (config, output) = setup(
         Path::new(file!())
             .file_stem()
@@ -55,6 +60,7 @@ impl PrefillStrategy {
                 scope(|s| {
                     for t in 0..threads {
                         s.spawn(move |_| {
+                            unsafe { Allocator::register_current_thread().unwrap() };
                             let rng = &mut rand::thread_rng();
                             let count = config.prefill / threads
                                 + if t < config.prefill % threads { 1 } else { 0 };
@@ -63,6 +69,7 @@ impl PrefillStrategy {
                                 let value = key;
                                 map.insert(key, value);
                             }
+                            unsafe { Allocator::unregister_current_thread() };
                         });
                     }
                 })
@@ -101,6 +108,7 @@ fn bench_map<M: ConcurrentMap<usize, usize> + Send + Sync>(
         if config.aux_thread > 0 {
             let mem_sender = mem_sender.clone();
             s.spawn(move |_| {
+                unsafe { Allocator::register_current_thread().unwrap() };
                 assert!(config.sampling);
                 let mut samples = 0usize;
                 let mut acc = 0usize;
@@ -123,6 +131,7 @@ fn bench_map<M: ConcurrentMap<usize, usize> + Send + Sync>(
                     std::thread::sleep(config.aux_thread_period);
                 }
                 mem_sender.send((peak, acc / samples, 0, 0)).unwrap();
+                unsafe { Allocator::unregister_current_thread() };
             });
         } else {
             mem_sender.send((0, 0, 0, 0)).unwrap();
@@ -131,6 +140,7 @@ fn bench_map<M: ConcurrentMap<usize, usize> + Send + Sync>(
         for _ in 0..config.threads {
             let ops_sender = ops_sender.clone();
             s.spawn(move |_| {
+                unsafe { Allocator::register_current_thread().unwrap() };
                 let mut ops: u64 = 0;
                 let mut rng = &mut rand::thread_rng();
                 barrier.clone().wait();
@@ -154,6 +164,7 @@ fn bench_map<M: ConcurrentMap<usize, usize> + Send + Sync>(
                 }
 
                 ops_sender.send(ops).unwrap();
+                unsafe { Allocator::unregister_current_thread() };
             });
         }
     })
