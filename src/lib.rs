@@ -56,7 +56,6 @@ cfg_if! {
     }
 }
 
-extern crate crossbeam_ebr;
 extern crate crossbeam_utils;
 #[macro_use]
 extern crate bitflags;
