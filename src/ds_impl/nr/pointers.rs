@@ -1,8 +1,5 @@
-use core::mem;
-use std::{
-    ptr::null_mut,
-    sync::atomic::{AtomicPtr, Ordering},
-};
+use portable_atomic::{AtomicU128, Ordering};
+use std::{marker::PhantomData, ptr::null_mut};
 
 pub struct CompareExchangeError<T, P: Pointer<T>> {
     pub new: P,
@@ -10,35 +7,54 @@ pub struct CompareExchangeError<T, P: Pointer<T>> {
 }
 
 pub struct Atomic<T> {
-    link: AtomicPtr<T>,
+    link: AtomicU128,
+    _marker: PhantomData<*mut T>,
 }
 
 unsafe impl<T> Sync for Atomic<T> {}
 unsafe impl<T> Send for Atomic<T> {}
 
+fn pack<T>(ptr: *mut T, tag: usize) -> u128 {
+    ((ptr as usize as u128) << 64) | (tag as u128)
+}
+
+fn unpack<T>(data: u128) -> (*mut T, usize) {
+    let mask = (1u128 << 64) - 1;
+    (
+        ((data & (mask << 64)) >> 64) as usize as *mut T,
+        (data & mask) as usize,
+    )
+}
+
 impl<T> Atomic<T> {
     pub fn new(init: T) -> Self {
-        let link = AtomicPtr::new(Box::into_raw(Box::new(init)));
-        Self { link }
+        let link = AtomicU128::new(pack(Box::into_raw(Box::new(init)), 0));
+        Self {
+            link,
+            _marker: PhantomData,
+        }
     }
 
     pub fn null() -> Self {
-        let link = AtomicPtr::new(null_mut());
-        Self { link }
+        let link = AtomicU128::new(pack(null_mut::<T>(), 0));
+        Self {
+            link,
+            _marker: PhantomData,
+        }
     }
 
     pub fn load(&self, order: Ordering) -> Shared<T> {
-        let ptr = self.link.load(order);
-        Shared { ptr }
+        let (ptr, tag) = unpack(self.link.load(order));
+        Shared { ptr, tag }
     }
 
     pub fn store(&self, ptr: Shared<T>, order: Ordering) {
-        self.link.store(ptr.into_raw(), order)
+        self.link.store(pack(ptr.ptr, ptr.tag), order)
     }
 
     pub fn fetch_or(&self, val: usize, order: Ordering) -> Shared<T> {
-        let ptr = self.link.fetch_or(val, order);
-        Shared { ptr }
+        let (ptr, tag) = unpack(self.link.fetch_or(val as u128, order));
+        Shared { ptr, tag }
     }
 
     pub fn compare_exchange<P: Pointer<T>>(
@@ -52,82 +68,90 @@ impl<T> Atomic<T> {
         let new = new.into_raw();
 
         match self.link.compare_exchange(current, new, success, failure) {
-            Ok(current) => Ok(Shared { ptr: current }),
+            Ok(current) => {
+                let (ptr, tag) = unpack(current);
+                Ok(Shared { ptr, tag })
+            }
             Err(current) => {
                 let new = unsafe { P::from_raw(new) };
+                let (ptr, tag) = unpack(current);
                 Err(CompareExchangeError {
                     new,
-                    current: Shared { ptr: current },
+                    current: Shared { ptr, tag },
                 })
             }
         }
     }
 
     pub unsafe fn into_owned(self) -> Box<T> {
-        Box::from_raw(self.link.into_inner())
+        Box::from_raw(unpack(self.link.into_inner()).0)
     }
 }
 
 impl<T> Default for Atomic<T> {
     fn default() -> Self {
-        Self {
-            link: AtomicPtr::default(),
-        }
+        Self::null()
     }
 }
 
 impl<T> From<Shared<T>> for Atomic<T> {
     fn from(value: Shared<T>) -> Self {
-        let link = AtomicPtr::new(value.into_raw());
-        Self { link }
+        let link = AtomicU128::new(value.into_raw());
+        Self {
+            link,
+            _marker: PhantomData,
+        }
     }
 }
 
 pub struct Shared<T> {
     ptr: *mut T,
+    tag: usize,
 }
 
 impl<T> Shared<T> {
     pub fn from_owned(init: T) -> Shared<T> {
         let ptr = Box::into_raw(Box::new(init));
-        Self { ptr }
+        Self { ptr, tag: 0 }
     }
 
     pub unsafe fn into_owned(self) -> T {
-        *Box::from_raw(decompose_tag(self.ptr).0)
+        *Box::from_raw(self.ptr)
     }
 
     pub fn null() -> Self {
-        Self { ptr: null_mut() }
+        Self {
+            ptr: null_mut(),
+            tag: 0,
+        }
     }
 
     pub fn tag(&self) -> usize {
-        decompose_tag(self.ptr).1
+        self.tag
     }
 
     pub fn is_null(&self) -> bool {
-        decompose_tag(self.ptr).0.is_null()
+        self.ptr.is_null()
     }
 
     pub fn with_tag(&self, tag: usize) -> Self {
-        let ptr = compose_tag(self.ptr, tag);
-        Self { ptr }
+        Self { ptr: self.ptr, tag }
     }
 
     pub unsafe fn as_ref<'g>(&self) -> Option<&'g T> {
-        decompose_tag(self.ptr).0.as_ref()
+        self.ptr.as_ref()
     }
 
     pub unsafe fn as_mut<'g>(&self) -> Option<&'g mut T> {
-        decompose_tag(self.ptr).0.as_mut()
+        self.ptr.as_mut()
     }
 
     pub unsafe fn deref<'g>(&self) -> &'g T {
-        &*decompose_tag(self.ptr).0
+        &*self.ptr
     }
 
     pub unsafe fn deref_mut<'g>(&mut self) -> &'g mut T {
-        &mut *decompose_tag(self.ptr).0
+        &mut *self.ptr
     }
 }
 
@@ -135,6 +159,7 @@ impl<T> From<usize> for Shared<T> {
     fn from(val: usize) -> Self {
         Self {
             ptr: val as *const T as *mut T,
+            tag: 0,
         }
     }
 }
@@ -156,59 +181,26 @@ impl<T> PartialEq for Shared<T> {
 impl<T> Eq for Shared<T> {}
 
 pub trait Pointer<T> {
-    fn into_raw(self) -> *mut T;
-    unsafe fn from_raw(val: *mut T) -> Self;
+    fn into_raw(self) -> u128;
+    unsafe fn from_raw(val: u128) -> Self;
 }
 
 impl<T> Pointer<T> for Shared<T> {
-    fn into_raw(self) -> *mut T {
-        self.ptr
+    fn into_raw(self) -> u128 {
+        pack(self.ptr, self.tag)
     }
 
-    unsafe fn from_raw(val: *mut T) -> Self {
+    unsafe fn from_raw(val: u128) -> Self {
         Shared::from(val as usize)
     }
 }
 
 impl<T> Pointer<T> for Box<T> {
-    fn into_raw(self) -> *mut T {
-        Box::into_raw(self)
+    fn into_raw(self) -> u128 {
+        pack(Box::into_raw(self), 0)
     }
 
-    unsafe fn from_raw(val: *mut T) -> Self {
-        Box::from_raw(val)
+    unsafe fn from_raw(val: u128) -> Self {
+        Box::from_raw(unpack(val).0)
     }
-}
-
-/// Returns a bitmask containing the unused least significant bits of an aligned pointer to `T`.
-#[inline]
-fn low_bits<T: Sized>() -> usize {
-    (1 << mem::align_of::<T>().trailing_zeros()) - 1
-}
-
-/// Given a tagged pointer `data`, returns the same pointer, but tagged with `tag`.
-///
-/// `tag` is truncated to fit into the unused bits of the pointer to `T`.
-#[inline]
-pub(crate) fn compose_tag<T: Sized>(ptr: *mut T, tag: usize) -> *mut T {
-    int_to_ptr_with_provenance(
-        (ptr as usize & !low_bits::<T>()) | (tag & low_bits::<T>()),
-        ptr,
-    )
-}
-
-/// Decomposes a tagged pointer `data` into the pointer and the tag.
-#[inline]
-pub(crate) fn decompose_tag<T: Sized>(ptr: *mut T) -> (*mut T, usize) {
-    (
-        int_to_ptr_with_provenance(ptr as usize & !low_bits::<T>(), ptr),
-        ptr as usize & low_bits::<T>(),
-    )
-}
-
-// HACK: https://github.com/rust-lang/miri/issues/1866#issuecomment-985802751
-#[inline]
-fn int_to_ptr_with_provenance<T>(addr: usize, prov: *mut T) -> *mut T {
-    let ptr = prov.cast::<u8>();
-    ptr.wrapping_add(addr.wrapping_sub(ptr as usize)).cast()
 }
