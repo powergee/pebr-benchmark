@@ -15,7 +15,7 @@ use std::sync::atomic::{compiler_fence, Ordering};
 use std::sync::{mpsc, Arc, Barrier};
 use std::time::{Duration, Instant};
 
-use smr_benchmark::{ds_impl, MemSampler};
+use smr_benchmark::{config::map::MemSampler, ds_impl};
 
 #[derive(PartialEq, Debug, ValueEnum, Clone)]
 #[allow(non_camel_case_types)]

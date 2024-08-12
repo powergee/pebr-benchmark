@@ -17,7 +17,7 @@ rand = "0.8"
 typenum = "1.17"
 num = "0.4.3"
 portable-atomic = "1"
-bdwgc-alloc = "0.6.8"
+bdwgc-alloc = { path = "../bdwgc-alloc" }
 
 [profile.release]
 lto = true

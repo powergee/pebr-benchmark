@@ -6,24 +6,6 @@
 #[macro_use]
 extern crate cfg_if;
 
-pub struct MemSampler {}
-
-impl Default for MemSampler {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl MemSampler {
-    pub fn new() -> Self {
-        println!("NOTE: Memory usage benchmark is supported only for linux.");
-        MemSampler {}
-    }
-    pub fn sample(&self) -> usize {
-        0
-    }
-}
-
 extern crate crossbeam_utils;
 #[macro_use]
 extern crate bitflags;

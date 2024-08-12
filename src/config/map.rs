@@ -1,4 +1,3 @@
-use crate::MemSampler;
 use clap::{value_parser, Arg, ArgAction, Command, ValueEnum};
 use csv::Writer;
 use rand::distributions::{Uniform, WeightedIndex};
@@ -6,6 +5,23 @@ use std::fmt;
 use std::fs::{create_dir_all, File, OpenOptions};
 use std::path::Path;
 use std::time::Duration;
+
+pub struct MemSampler {}
+
+impl Default for MemSampler {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl MemSampler {
+    pub fn new() -> Self {
+        MemSampler {}
+    }
+    pub fn sample(&self) -> usize {
+        bdwgc_alloc::Allocator::heap_size()
+    }
+}
 
 #[derive(PartialEq, Debug, ValueEnum, Clone)]
 pub enum DS {

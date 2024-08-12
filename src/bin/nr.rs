@@ -1,12 +1,11 @@
+use bdwgc_alloc::Allocator;
 use crossbeam_utils::thread::scope;
 use rand::prelude::*;
 use std::cmp::max;
 use std::io::{stdout, Write};
 use std::path::Path;
 use std::sync::{mpsc, Arc, Barrier};
-use std::thread::available_parallelism;
 use std::time::Instant;
-use bdwgc_alloc::Allocator;
 
 use smr_benchmark::config::map::{setup, BenchWriter, Config, Op, Perf, DS};
 use smr_benchmark::ds_impl::nr::{
@@ -17,7 +16,11 @@ use smr_benchmark::ds_impl::nr::{
 static GLOBAL_ALLOCATOR: Allocator = Allocator;
 
 fn main() {
-    unsafe { Allocator::initialize() };
+    unsafe {
+        Allocator::enable_incremental();
+        Allocator::initialize();
+        Allocator::expand_heap(1024 * 1024 * 1024);
+    }
     let (config, output) = setup(
         Path::new(file!())
             .file_stem()
@@ -54,26 +57,12 @@ impl PrefillStrategy {
     fn prefill<M: ConcurrentMap<usize, usize> + Send + Sync>(self, config: &Config, map: &M) {
         match self {
             PrefillStrategy::Random => {
-                let threads = available_parallelism().map(|v| v.get()).unwrap_or(1);
-                print!("prefilling with {threads} threads... ");
-                stdout().flush().unwrap();
-                scope(|s| {
-                    for t in 0..threads {
-                        s.spawn(move |_| {
-                            unsafe { Allocator::register_current_thread().unwrap() };
-                            let rng = &mut rand::thread_rng();
-                            let count = config.prefill / threads
-                                + if t < config.prefill % threads { 1 } else { 0 };
-                            for _ in 0..count {
-                                let key = config.key_dist.sample(rng);
-                                let value = key;
-                                map.insert(key, value);
-                            }
-                            unsafe { Allocator::unregister_current_thread() };
-                        });
-                    }
-                })
-                .unwrap();
+                let rng = &mut rand::thread_rng();
+                for _ in 0..config.prefill {
+                    let key = config.key_dist.sample(rng);
+                    let value = key;
+                    map.insert(key, value);
+                }
             }
             PrefillStrategy::Decreasing => {
                 let rng = &mut rand::thread_rng();
