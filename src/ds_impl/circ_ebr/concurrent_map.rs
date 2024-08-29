@@ -1,23 +1,23 @@
-use circ::CsEBR;
+use circ::Guard;
 
-pub trait OutputHolder<V> {
-    fn output(&self) -> &V;
+pub trait OutputHolder<'g, V> {
+    fn output(&self) -> &'g V;
 }
 
 pub trait ConcurrentMap<K, V> {
-    type Output: OutputHolder<V>;
+    type Output<'g>: OutputHolder<'g, V>;
 
     fn new() -> Self;
-    fn get(&self, key: &K, cs: &CsEBR) -> Option<Self::Output>;
-    fn insert(&self, key: K, value: V, cs: &CsEBR) -> bool;
-    fn remove(&self, key: &K, cs: &CsEBR) -> Option<Self::Output>;
+    fn get<'g>(&self, key: &K, cs: &'g Guard) -> Option<Self::Output<'g>>;
+    fn insert<'g>(&self, key: K, value: V, cs: &'g Guard) -> bool;
+    fn remove<'g>(&self, key: &K, cs: &'g Guard) -> Option<Self::Output<'g>>;
 }
 
 #[cfg(test)]
 pub mod tests {
     extern crate rand;
     use super::{ConcurrentMap, OutputHolder};
-    use circ::{Cs, CsEBR};
+    use circ::cs;
     use crossbeam_utils::thread;
     use rand::prelude::*;
 
@@ -35,7 +35,7 @@ pub mod tests {
                         (0..ELEMENTS_PER_THREADS).map(|k| k * THREADS + t).collect();
                     keys.shuffle(&mut rng);
                     for i in keys {
-                        assert!(map.insert(i, i.to_string(), &CsEBR::new()));
+                        assert!(map.insert(i, i.to_string(), &cs()));
                     }
                 });
             }
@@ -49,10 +49,10 @@ pub mod tests {
                     let mut keys: Vec<i32> =
                         (0..ELEMENTS_PER_THREADS).map(|k| k * THREADS + t).collect();
                     keys.shuffle(&mut rng);
-                    let cs = &mut CsEBR::new();
+                    let cs = &mut cs();
                     for i in keys {
                         assert_eq!(i.to_string(), *map.remove(&i, cs).unwrap().output());
-                        cs.clear();
+                        cs.reactivate();
                     }
                 });
             }
@@ -66,15 +66,17 @@ pub mod tests {
                     let mut keys: Vec<i32> =
                         (0..ELEMENTS_PER_THREADS).map(|k| k * THREADS + t).collect();
                     keys.shuffle(&mut rng);
-                    let cs = &mut CsEBR::new();
+                    let cs = &mut cs();
                     for i in keys {
-                        let result = map.get(&i, cs);
-                        if (0..THREADS / 2).contains(&i) {
-                            assert!(result.is_none());
-                        } else {
-                            assert_eq!(i.to_string(), *result.unwrap().output());
+                        {
+                            let result = map.get(&i, cs);
+                            if (0..THREADS / 2).contains(&i) {
+                                assert!(result.is_none());
+                            } else {
+                                assert_eq!(i.to_string(), *result.unwrap().output());
+                            }
                         }
-                        cs.clear();
+                        cs.reactivate();
                     }
                 });
             }

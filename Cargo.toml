@@ -1,13 +1,3 @@
-[workspace]
-members = [
-    "./smrs/hp-pp",
-    "./smrs/nbr",
-    "./smrs/cdrc",
-    "./smrs/hp-brcu",
-    "./smrs/vbr",
-    "./smrs/circ",
-]
-
 [package]
 name = "smr-benchmark"
 version = "0.1.0"
@@ -26,12 +16,7 @@ csv = "1.3.0"
 rand = "0.8"
 typenum = "1.17"
 num = "0.4.3"
-hp_pp = { path = "./smrs/hp-pp" }
-nbr = { path = "./smrs/nbr" }
-cdrc = { path = "./smrs/cdrc" }
-hp-brcu = { path = "./smrs/hp-brcu" }
-vbr = { path = "./smrs/vbr" }
-circ = { path = "./smrs/circ" }
+circ = { git = "https://github.com/powergee/circ.git", branch = "into_inner" }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 tikv-jemallocator = "0.5"
@@ -41,11 +26,6 @@ tikv-jemalloc-ctl = "0.5"
 package = "crossbeam-epoch"
 git = "https://github.com/kaist-cp/crossbeam"
 branch = "smr-benchmark"
-
-[dependencies.crossbeam-pebr]
-package = "crossbeam-pebr-epoch"
-git = "https://github.com/kaist-cp/crossbeam"
-branch = "pebr"
 
 [profile.release]
 lto = true
@@ -60,6 +40,3 @@ inherits = "release"
 debug = true
 lto = false
 codegen-units = 16
-
-[features]
-sanitize = ["crossbeam-pebr/sanitize"]

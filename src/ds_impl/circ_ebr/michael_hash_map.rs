@@ -1,5 +1,5 @@
 use super::concurrent_map::ConcurrentMap;
-use circ::CsEBR;
+use circ::Guard;
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 
@@ -11,8 +11,8 @@ pub struct HashMap<K, V> {
 
 impl<K, V> HashMap<K, V>
 where
-    K: Ord + Hash + Default,
-    V: Default,
+    K: Ord + Hash + Default + 'static,
+    V: Default + 'static,
 {
     pub fn with_capacity(n: usize) -> Self {
         let mut buckets = Vec::with_capacity(n);
@@ -35,21 +35,25 @@ where
         s.finish() as usize
     }
 
-    pub fn get(&self, k: &K, cs: &CsEBR) -> Option<<HHSList<K, V> as ConcurrentMap<K, V>>::Output> {
+    pub fn get<'g>(
+        &self,
+        k: &K,
+        cs: &'g Guard,
+    ) -> Option<<HHSList<K, V> as ConcurrentMap<K, V>>::Output<'g>> {
         let i = Self::hash(k);
         self.get_bucket(i).get(k, cs)
     }
 
-    pub fn insert(&self, k: K, v: V, cs: &CsEBR) -> bool {
+    pub fn insert<'g>(&self, k: K, v: V, cs: &'g Guard) -> bool {
         let i = Self::hash(&k);
         self.get_bucket(i).insert(k, v, cs)
     }
 
-    pub fn remove(
+    pub fn remove<'g>(
         &self,
         k: &K,
-        cs: &CsEBR,
-    ) -> Option<<HHSList<K, V> as ConcurrentMap<K, V>>::Output> {
+        cs: &'g Guard,
+    ) -> Option<<HHSList<K, V> as ConcurrentMap<K, V>>::Output<'g>> {
         let i = Self::hash(k);
         self.get_bucket(i).remove(k, cs)
     }
@@ -57,25 +61,25 @@ where
 
 impl<K, V> ConcurrentMap<K, V> for HashMap<K, V>
 where
-    K: Ord + Hash + Default,
-    V: Default,
+    K: Ord + Hash + Default + 'static,
+    V: Default + 'static,
 {
-    type Output = <HHSList<K, V> as ConcurrentMap<K, V>>::Output;
+    type Output<'g> = <HHSList<K, V> as ConcurrentMap<K, V>>::Output<'g>;
 
     fn new() -> Self {
         Self::with_capacity(30000)
     }
 
     #[inline(always)]
-    fn get(&self, key: &K, cs: &CsEBR) -> Option<Self::Output> {
+    fn get<'g>(&self, key: &K, cs: &'g Guard) -> Option<Self::Output<'g>> {
         self.get(key, cs)
     }
     #[inline(always)]
-    fn insert(&self, key: K, value: V, cs: &CsEBR) -> bool {
+    fn insert<'g>(&self, key: K, value: V, cs: &'g Guard) -> bool {
         self.insert(key, value, cs)
     }
     #[inline(always)]
-    fn remove(&self, key: &K, cs: &CsEBR) -> Option<Self::Output> {
+    fn remove<'g>(&self, key: &K, cs: &'g Guard) -> Option<Self::Output<'g>> {
         self.remove(key, cs)
     }
 }

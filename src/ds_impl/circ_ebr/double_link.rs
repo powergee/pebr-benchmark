@@ -1,14 +1,14 @@
 use std::sync::atomic::Ordering;
 
-use circ::{AtomicRc, CsEBR, GraphNode, Pointer, Rc, Snapshot, StrongPtr, Weak};
+use circ::{AtomicRc, Guard, Rc, RcObject, Snapshot, Weak};
 use crossbeam_utils::CachePadded;
 
-pub struct Output<T> {
-    found: Snapshot<Node<T>, CsEBR>,
+pub struct Output<'g, T> {
+    found: Snapshot<'g, Node<T>>,
 }
 
-impl<T> Output<T> {
-    pub fn output(&self) -> &T {
+impl<'g, T> Output<'g, T> {
+    pub fn output(&self) -> &'g T {
         self.found
             .as_ref()
             .map(|node| node.item.as_ref().unwrap())
@@ -18,27 +18,13 @@ impl<T> Output<T> {
 
 struct Node<T> {
     item: Option<T>,
-    prev: Weak<Node<T>, CsEBR>,
-    next: CachePadded<AtomicRc<Node<T>, CsEBR>>,
+    prev: Weak<Node<T>>,
+    next: CachePadded<AtomicRc<Node<T>>>,
 }
 
-impl<T> GraphNode<CsEBR> for Node<T> {
-    const UNIQUE_OUTDEGREE: bool = true;
-
-    #[inline]
-    fn pop_outgoings(&mut self, result: &mut Vec<Rc<Self, CsEBR>>)
-    where
-        Self: Sized,
-    {
-        result.push(self.next.take());
-    }
-
-    #[inline]
-    fn pop_unique(&mut self) -> Rc<Self, CsEBR>
-    where
-        Self: Sized,
-    {
-        self.next.take()
+unsafe impl<T> RcObject for Node<T> {
+    fn pop_edges(&mut self, out: &mut Vec<Rc<Self>>) {
+        out.push(self.next.take());
     }
 }
 
@@ -64,8 +50,8 @@ unsafe impl<T: Sync> Sync for Node<T> {}
 unsafe impl<T: Sync> Send for Node<T> {}
 
 pub struct DoubleLink<T: Sync + Send> {
-    head: CachePadded<AtomicRc<Node<T>, CsEBR>>,
-    tail: CachePadded<AtomicRc<Node<T>, CsEBR>>,
+    head: CachePadded<AtomicRc<Node<T>>>,
+    tail: CachePadded<AtomicRc<Node<T>>>,
 }
 
 impl<T: Sync + Send> Default for DoubleLink<T> {
@@ -87,28 +73,27 @@ impl<T: Sync + Send> DoubleLink<T> {
     }
 
     #[inline]
-    pub fn enqueue(&self, item: T, cs: &CsEBR) {
+    pub fn enqueue(&self, item: T, cs: &Guard) {
         let [mut node, sub] = Rc::new_many(Node::new(item));
 
         loop {
-            let ltail = self.tail.load_ss(cs);
-            unsafe { node.deref_mut() }.prev = ltail.downgrade();
+            let ltail = self.tail.load(Ordering::Acquire, cs);
+            unsafe { node.as_mut().unwrap() }.prev = ltail.downgrade().counted();
 
             // Try to help the previous enqueue to complete.
-            let mut lprev = Snapshot::new();
-            lprev.protect_weak(unsafe { &ltail.deref().prev }, cs);
-            if let Some(lprev) = lprev.as_ref() {
-                if lprev.next.load(Ordering::SeqCst).is_null() {
-                    lprev.next.store(ltail.upgrade(), Ordering::Relaxed, cs);
+            let lprev = unsafe { &ltail.deref().prev }
+                .snapshot(cs)
+                .upgrade()
+                .and_then(|node| node.as_ref());
+            if let Some(lprev) = lprev {
+                if lprev.next.load(Ordering::SeqCst, cs).is_null() {
+                    lprev.next.store(ltail.counted(), Ordering::Relaxed, cs);
                 }
             }
-            match self.tail.compare_exchange(
-                ltail.as_ptr(),
-                node,
-                Ordering::SeqCst,
-                Ordering::SeqCst,
-                cs,
-            ) {
+            match self
+                .tail
+                .compare_exchange(ltail, node, Ordering::SeqCst, Ordering::SeqCst, cs)
+            {
                 Ok(_) => {
                     unsafe { ltail.deref() }
                         .next
@@ -121,10 +106,10 @@ impl<T: Sync + Send> DoubleLink<T> {
     }
 
     #[inline]
-    pub fn dequeue(&self, cs: &CsEBR) -> Option<Output<T>> {
+    pub fn dequeue<'g>(&self, cs: &'g Guard) -> Option<Output<'g, T>> {
         loop {
-            let lhead = self.head.load_ss(cs);
-            let lnext = unsafe { lhead.deref().next.load_ss(cs) };
+            let lhead = self.head.load(Ordering::Acquire, cs);
+            let lnext = lhead.as_ref().unwrap().next.load(Ordering::Acquire, cs);
             // Check if this queue is empty.
             if lnext.is_null() {
                 return None;
@@ -133,8 +118,8 @@ impl<T: Sync + Send> DoubleLink<T> {
             if self
                 .head
                 .compare_exchange(
-                    lhead.as_ptr(),
-                    lnext.upgrade(),
+                    lhead,
+                    lnext.counted(),
                     Ordering::SeqCst,
                     Ordering::SeqCst,
                     cs,
@@ -152,13 +137,13 @@ mod test {
     use std::sync::atomic::{AtomicU32, Ordering};
 
     use super::DoubleLink;
-    use circ::{Cs, CsEBR};
+    use circ::cs;
     use crossbeam_utils::thread::scope;
 
     #[test]
     fn simple() {
         let queue = DoubleLink::new();
-        let guard = &CsEBR::new();
+        let guard = &cs();
         assert!(queue.dequeue(guard).is_none());
         queue.enqueue(1, guard);
         queue.enqueue(2, guard);
@@ -183,7 +168,7 @@ mod test {
                 let queue = &queue;
                 s.spawn(move |_| {
                     for i in 0..ELEMENTS_PER_THREAD {
-                        queue.enqueue((t * ELEMENTS_PER_THREAD + i).to_string(), &CsEBR::new());
+                        queue.enqueue((t * ELEMENTS_PER_THREAD + i).to_string(), &cs());
                     }
                 });
             }
@@ -196,7 +181,7 @@ mod test {
                 let found = &found;
                 s.spawn(move |_| {
                     for _ in 0..ELEMENTS_PER_THREAD {
-                        let guard = CsEBR::new();
+                        let guard = cs();
                         let output = queue.dequeue(&guard).unwrap();
                         let res = output.output();
                         assert_eq!(

@@ -1,18 +1,15 @@
-use circ::{ebr_impl, set_counts_between_flush_ebr, Cs, CsEBR};
+use circ::cs;
 use crossbeam_utils::thread::scope;
 use rand::prelude::*;
 use std::cmp::max;
 use std::io::{stdout, Write};
 use std::path::Path;
-use std::sync::atomic::Ordering;
 use std::sync::{mpsc, Arc, Barrier};
 use std::thread::available_parallelism;
 use std::time::Instant;
 
-use smr_benchmark::config::map::{setup, BagSize, BenchWriter, Config, Op, Perf, DS};
-use smr_benchmark::ds_impl::circ_ebr::{
-    BonsaiTreeMap, ConcurrentMap, HHSList, HList, HMList, HashMap, NMTreeMap, SkipList,
-};
+use smr_benchmark::config::map::{setup, BenchWriter, Config, Op, Perf, DS};
+use smr_benchmark::ds_impl::circ_ebr::{ConcurrentMap, EFRBTree, HHSList, HList, HMList, HashMap};
 
 fn main() {
     let (config, output) = setup(
@@ -32,9 +29,7 @@ fn bench(config: &Config, output: BenchWriter) {
         DS::HMList => bench_map::<HMList<usize, usize>>(config, PrefillStrategy::Decreasing),
         DS::HHSList => bench_map::<HHSList<usize, usize>>(config, PrefillStrategy::Decreasing),
         DS::HashMap => bench_map::<HashMap<usize, usize>>(config, PrefillStrategy::Decreasing),
-        DS::NMTree => bench_map::<NMTreeMap<usize, usize>>(config, PrefillStrategy::Random),
-        DS::SkipList => bench_map::<SkipList<usize, usize>>(config, PrefillStrategy::Decreasing),
-        DS::BonsaiTree => bench_map::<BonsaiTreeMap<usize, usize>>(config, PrefillStrategy::Random),
+        DS::EFRBTree => bench_map::<EFRBTree<usize, usize>>(config, PrefillStrategy::Random),
         _ => panic!("Unsupported(or unimplemented) data structure for CIRC"),
     };
     output.write_record(config, &perf);
@@ -57,7 +52,7 @@ impl PrefillStrategy {
                 scope(|s| {
                     for t in 0..threads {
                         s.spawn(move |_| {
-                            let cs = unsafe { &Cs::unprotected() };
+                            let cs = &cs();
                             let rng = &mut rand::thread_rng();
                             let count = config.prefill / threads
                                 + if t < config.prefill % threads { 1 } else { 0 };
@@ -72,7 +67,7 @@ impl PrefillStrategy {
                 .unwrap();
             }
             PrefillStrategy::Decreasing => {
-                let cs = unsafe { &Cs::unprotected() };
+                let cs = &cs();
                 let rng = &mut rand::thread_rng();
                 let mut keys = Vec::with_capacity(config.prefill);
                 for _ in 0..config.prefill {
@@ -94,10 +89,6 @@ fn bench_map<M: ConcurrentMap<usize, usize> + Send + Sync>(
     config: &Config,
     strategy: PrefillStrategy,
 ) -> Perf {
-    match config.bag_size {
-        BagSize::Small => set_counts_between_flush_ebr(64),
-        BagSize::Large => set_counts_between_flush_ebr(4096),
-    }
     let map = &M::new();
     strategy.prefill(config, map);
 
@@ -128,7 +119,7 @@ fn bench_map<M: ConcurrentMap<usize, usize> + Send + Sync>(
                         acc += allocated;
                         peak = max(peak, allocated);
 
-                        let garb = ebr_impl::GLOBAL_GARBAGE_COUNT.load(Ordering::Acquire);
+                        let garb = 0;
                         garb_acc += garb;
                         garb_peak = max(garb_peak, garb);
 
@@ -157,7 +148,7 @@ fn bench_map<M: ConcurrentMap<usize, usize> + Send + Sync>(
                 barrier.clone().wait();
                 let start = Instant::now();
 
-                let mut cs = CsEBR::new();
+                let mut cs = cs();
                 while start.elapsed() < config.duration {
                     let key = config.key_dist.sample(rng);
                     match Op::OPS[config.op_dist.sample(&mut rng)] {
@@ -173,7 +164,7 @@ fn bench_map<M: ConcurrentMap<usize, usize> + Send + Sync>(
                         }
                     }
                     ops += 1;
-                    cs.clear();
+                    cs.reactivate();
                 }
 
                 ops_sender.send(ops).unwrap();

@@ -4,7 +4,6 @@ extern crate csv;
 extern crate crossbeam_ebr;
 extern crate smr_benchmark;
 
-use circ::Cs;
 use clap::{value_parser, Arg, ArgMatches, Command, ValueEnum};
 use crossbeam_utils::thread::scope;
 use csv::Writer;
@@ -24,13 +23,7 @@ use smr_benchmark::{ds_impl, MemSampler};
 pub enum MM {
     NR,
     EBR,
-    HP,
-    CDRC_EBR,
-    CDRC_HP,
-    CDRC_EBR_FLUSH,
-    CDRC_HP_FLUSH,
     CIRC_EBR,
-    CIRC_HP,
 }
 
 struct Config {
@@ -146,13 +139,7 @@ fn bench(config: &Config, output: Option<&mut Writer<File>>) {
     let (ops_per_sec, peak_mem, avg_mem) = match config.mm {
         MM::NR => bench_queue_nr(config),
         MM::EBR => bench_queue_ebr(config),
-        MM::HP => bench_queue_hp(config),
-        MM::CDRC_EBR => bench_queue_cdrc::<cdrc::CsEBR>(config),
-        MM::CDRC_HP => bench_queue_cdrc::<cdrc::CsHP>(config),
-        MM::CDRC_EBR_FLUSH => bench_queue_cdrc_flush::<cdrc::CsEBR>(config),
-        MM::CDRC_HP_FLUSH => bench_queue_cdrc_flush::<cdrc::CsHP>(config),
         MM::CIRC_EBR => bench_queue_circ_ebr(config),
-        MM::CIRC_HP => bench_queue_circ_hp(config),
     };
     if let Some(output) = output {
         output
@@ -340,252 +327,6 @@ fn bench_queue_ebr(config: &Config) -> (u64, usize, usize) {
     (ops_per_sec, peak_mem, avg_mem)
 }
 
-fn bench_queue_hp(config: &Config) -> (u64, usize, usize) {
-    let queue = ds_impl::hp::DoubleLink::new();
-
-    let barrier = &Arc::new(Barrier::new(config.threads + config.aux_thread));
-    let (ops_sender, ops_receiver) = mpsc::channel();
-    let (mem_sender, mem_receiver) = mpsc::channel();
-
-    scope(|s| {
-        // sampling & interference thread
-        if config.aux_thread > 0 {
-            let mem_sender = mem_sender.clone();
-            s.spawn(move |_| {
-                let mut samples = 0usize;
-                let mut acc = 0usize;
-                let mut peak = 0usize;
-                barrier.clone().wait();
-
-                let start = Instant::now();
-                let mut next_sampling = start + Duration::from_millis(1);
-                while start.elapsed() < config.duration {
-                    let now = Instant::now();
-                    if now > next_sampling {
-                        let allocated = config.mem_sampler.sample();
-                        samples += 1;
-
-                        acc += allocated;
-                        peak = max(peak, allocated);
-
-                        next_sampling = now + Duration::from_millis(1);
-                    }
-                    std::thread::sleep(config.aux_thread_period);
-                }
-
-                if config.sampling {
-                    mem_sender.send((peak, acc / samples)).unwrap();
-                } else {
-                    mem_sender.send((0, 0)).unwrap();
-                }
-            });
-        } else {
-            mem_sender.send((0, 0)).unwrap();
-        }
-
-        for _ in 0..config.threads {
-            let ops_sender = ops_sender.clone();
-            let queue = &queue;
-            s.spawn(move |_| {
-                let mut ops: u64 = 0;
-                let rng = &mut rand::thread_rng();
-                let dist = Uniform::new(0, 100000);
-                let mut handle = ds_impl::hp::double_link::Handle::default();
-                barrier.clone().wait();
-                let start = Instant::now();
-
-                while start.elapsed() < config.duration {
-                    let item = dist.sample(rng).to_string();
-                    queue.enqueue(item, &mut handle);
-                    compiler_fence(Ordering::SeqCst);
-                    queue.dequeue(&mut handle).unwrap();
-                    compiler_fence(Ordering::SeqCst);
-
-                    ops += 1;
-                }
-                ops_sender.send(ops).unwrap();
-            });
-        }
-    })
-    .unwrap();
-    println!("end");
-
-    let mut ops = 0;
-    for _ in 0..config.threads {
-        let local_ops = ops_receiver.recv().unwrap();
-        ops += local_ops;
-    }
-    let ops_per_sec = ops / config.interval;
-    let (peak_mem, avg_mem) = mem_receiver.recv().unwrap();
-    (ops_per_sec, peak_mem, avg_mem)
-}
-
-fn bench_queue_cdrc<C: cdrc::Cs>(config: &Config) -> (u64, usize, usize) {
-    let queue = ds_impl::cdrc::DoubleLink::<_, C>::new();
-
-    let barrier = &Arc::new(Barrier::new(config.threads + config.aux_thread));
-    let (ops_sender, ops_receiver) = mpsc::channel();
-    let (mem_sender, mem_receiver) = mpsc::channel();
-
-    scope(|s| {
-        // sampling & interference thread
-        if config.aux_thread > 0 {
-            let mem_sender = mem_sender.clone();
-            s.spawn(move |_| {
-                let mut samples = 0usize;
-                let mut acc = 0usize;
-                let mut peak = 0usize;
-                barrier.clone().wait();
-
-                let start = Instant::now();
-                let mut next_sampling = start + Duration::from_millis(1);
-                while start.elapsed() < config.duration {
-                    let now = Instant::now();
-                    if now > next_sampling {
-                        let allocated = config.mem_sampler.sample();
-                        samples += 1;
-
-                        acc += allocated;
-                        peak = max(peak, allocated);
-
-                        next_sampling = now + Duration::from_millis(1);
-                    }
-                    std::thread::sleep(config.aux_thread_period);
-                }
-
-                if config.sampling {
-                    mem_sender.send((peak, acc / samples)).unwrap();
-                } else {
-                    mem_sender.send((0, 0)).unwrap();
-                }
-            });
-        } else {
-            mem_sender.send((0, 0)).unwrap();
-        }
-
-        for _ in 0..config.threads {
-            let ops_sender = ops_sender.clone();
-            let queue = &queue;
-            s.spawn(move |_| {
-                let mut ops: u64 = 0;
-                let rng = &mut rand::thread_rng();
-                let dist = Uniform::new(0, 100000);
-                let mut holder = ds_impl::cdrc::double_link::Holder::new();
-                barrier.clone().wait();
-                let start = Instant::now();
-
-                let mut cs = C::new();
-                while start.elapsed() < config.duration {
-                    let item = dist.sample(rng).to_string();
-                    queue.enqueue(item, &mut holder, &cs);
-                    compiler_fence(Ordering::SeqCst);
-                    queue.dequeue(&mut holder, &cs).unwrap();
-                    compiler_fence(Ordering::SeqCst);
-
-                    ops += 1;
-                    cs.clear();
-                }
-                ops_sender.send(ops).unwrap();
-            });
-        }
-    })
-    .unwrap();
-    println!("end");
-
-    let mut ops = 0;
-    for _ in 0..config.threads {
-        let local_ops = ops_receiver.recv().unwrap();
-        ops += local_ops;
-    }
-    let ops_per_sec = ops / config.interval;
-    let (peak_mem, avg_mem) = mem_receiver.recv().unwrap();
-    (ops_per_sec, peak_mem, avg_mem)
-}
-
-fn bench_queue_cdrc_flush<C: cdrc::Cs>(config: &Config) -> (u64, usize, usize) {
-    let queue = ds_impl::cdrc::DoubleLink::<_, C>::new();
-
-    let barrier = &Arc::new(Barrier::new(config.threads + config.aux_thread));
-    let (ops_sender, ops_receiver) = mpsc::channel();
-    let (mem_sender, mem_receiver) = mpsc::channel();
-
-    scope(|s| {
-        // sampling & interference thread
-        if config.aux_thread > 0 {
-            let mem_sender = mem_sender.clone();
-            s.spawn(move |_| {
-                let mut samples = 0usize;
-                let mut acc = 0usize;
-                let mut peak = 0usize;
-                barrier.clone().wait();
-
-                let start = Instant::now();
-                let mut next_sampling = start + Duration::from_millis(1);
-                while start.elapsed() < config.duration {
-                    let now = Instant::now();
-                    if now > next_sampling {
-                        let allocated = config.mem_sampler.sample();
-                        samples += 1;
-
-                        acc += allocated;
-                        peak = max(peak, allocated);
-
-                        next_sampling = now + Duration::from_millis(1);
-                    }
-                    std::thread::sleep(config.aux_thread_period);
-                }
-
-                if config.sampling {
-                    mem_sender.send((peak, acc / samples)).unwrap();
-                } else {
-                    mem_sender.send((0, 0)).unwrap();
-                }
-            });
-        } else {
-            mem_sender.send((0, 0)).unwrap();
-        }
-
-        for _ in 0..config.threads {
-            let ops_sender = ops_sender.clone();
-            let queue = &queue;
-            s.spawn(move |_| {
-                let mut ops: u64 = 0;
-                let rng = &mut rand::thread_rng();
-                let dist = Uniform::new(0, 100000);
-                let mut holder = ds_impl::cdrc::double_link::Holder::new();
-                barrier.clone().wait();
-                let start = Instant::now();
-
-                let mut cs = C::new();
-                while start.elapsed() < config.duration {
-                    let item = dist.sample(rng).to_string();
-                    queue.enqueue(item, &mut holder, &cs);
-                    cs.eager_reclaim();
-                    compiler_fence(Ordering::SeqCst);
-                    queue.dequeue(&mut holder, &cs).unwrap();
-                    cs.eager_reclaim();
-                    compiler_fence(Ordering::SeqCst);
-
-                    ops += 1;
-                    cs.clear();
-                }
-                ops_sender.send(ops).unwrap();
-            });
-        }
-    })
-    .unwrap();
-    println!("end");
-
-    let mut ops = 0;
-    for _ in 0..config.threads {
-        let local_ops = ops_receiver.recv().unwrap();
-        ops += local_ops;
-    }
-    let ops_per_sec = ops / config.interval;
-    let (peak_mem, avg_mem) = mem_receiver.recv().unwrap();
-    (ops_per_sec, peak_mem, avg_mem)
-}
-
 fn bench_queue_circ_ebr(config: &Config) -> (u64, usize, usize) {
     let queue = ds_impl::circ_ebr::DoubleLink::new();
 
@@ -639,7 +380,7 @@ fn bench_queue_circ_ebr(config: &Config) -> (u64, usize, usize) {
                 barrier.clone().wait();
                 let start = Instant::now();
 
-                let mut cs = circ::CsEBR::new();
+                let mut cs = circ::cs();
                 while start.elapsed() < config.duration {
                     let item = dist.sample(rng).to_string();
                     queue.enqueue(item, &cs);
@@ -648,89 +389,7 @@ fn bench_queue_circ_ebr(config: &Config) -> (u64, usize, usize) {
                     compiler_fence(Ordering::SeqCst);
 
                     ops += 1;
-                    cs.clear();
-                }
-                ops_sender.send(ops).unwrap();
-            });
-        }
-    })
-    .unwrap();
-    println!("end");
-
-    let mut ops = 0;
-    for _ in 0..config.threads {
-        let local_ops = ops_receiver.recv().unwrap();
-        ops += local_ops;
-    }
-    let ops_per_sec = ops / config.interval;
-    let (peak_mem, avg_mem) = mem_receiver.recv().unwrap();
-    (ops_per_sec, peak_mem, avg_mem)
-}
-
-fn bench_queue_circ_hp(config: &Config) -> (u64, usize, usize) {
-    let queue = ds_impl::circ_hp::DoubleLink::new();
-
-    let barrier = &Arc::new(Barrier::new(config.threads + config.aux_thread));
-    let (ops_sender, ops_receiver) = mpsc::channel();
-    let (mem_sender, mem_receiver) = mpsc::channel();
-
-    scope(|s| {
-        // sampling & interference thread
-        if config.aux_thread > 0 {
-            let mem_sender = mem_sender.clone();
-            s.spawn(move |_| {
-                let mut samples = 0usize;
-                let mut acc = 0usize;
-                let mut peak = 0usize;
-                barrier.clone().wait();
-
-                let start = Instant::now();
-                let mut next_sampling = start + Duration::from_millis(1);
-                while start.elapsed() < config.duration {
-                    let now = Instant::now();
-                    if now > next_sampling {
-                        let allocated = config.mem_sampler.sample();
-                        samples += 1;
-
-                        acc += allocated;
-                        peak = max(peak, allocated);
-
-                        next_sampling = now + Duration::from_millis(1);
-                    }
-                    std::thread::sleep(config.aux_thread_period);
-                }
-
-                if config.sampling {
-                    mem_sender.send((peak, acc / samples)).unwrap();
-                } else {
-                    mem_sender.send((0, 0)).unwrap();
-                }
-            });
-        } else {
-            mem_sender.send((0, 0)).unwrap();
-        }
-
-        for _ in 0..config.threads {
-            let ops_sender = ops_sender.clone();
-            let queue = &queue;
-            s.spawn(move |_| {
-                let mut ops: u64 = 0;
-                let rng = &mut rand::thread_rng();
-                let dist = Uniform::new(0, 100000);
-                let mut holder = ds_impl::circ_hp::double_link::Holder::new();
-                barrier.clone().wait();
-                let start = Instant::now();
-
-                let mut cs = Cs::new();
-                while start.elapsed() < config.duration {
-                    let item = dist.sample(rng).to_string();
-                    queue.enqueue(item, &mut holder, &cs);
-                    compiler_fence(Ordering::SeqCst);
-                    queue.dequeue(&mut holder, &cs).unwrap();
-                    compiler_fence(Ordering::SeqCst);
-
-                    ops += 1;
-                    cs.clear();
+                    cs.reactivate();
                 }
                 ops_sender.send(ops).unwrap();
             });
