@@ -4,7 +4,6 @@ extern crate clap;
 extern crate csv;
 
 extern crate crossbeam_ebr;
-extern crate crossbeam_pebr;
 extern crate smr_benchmark;
 
 use clap::{value_parser, Arg, ArgMatches, Command, ValueEnum};
@@ -44,7 +43,6 @@ struct NBRConfig {
 pub enum MM {
     NR,
     EBR,
-    PEBR,
     HP,
     HP_PP,
     CDRC_EBR,
@@ -264,7 +262,6 @@ fn bench<N: Unsigned>(config: &Config, output: Option<&mut Writer<File>>) {
     let (ops_per_sec, peak_mem, avg_mem, peak_garb, avg_garb) = match config.mm {
         MM::NR => bench_map_nr(config, PrefillStrategy::Decreasing),
         MM::EBR => bench_map_ebr::<N>(config, PrefillStrategy::Decreasing),
-        MM::PEBR => bench_map_pebr::<N>(config, PrefillStrategy::Decreasing),
         MM::HP => bench_map_hp(config, PrefillStrategy::Decreasing),
         MM::HP_PP => bench_map_hp_pp(config, PrefillStrategy::Decreasing),
         MM::CDRC_EBR => bench_map_cdrc::<cdrc::CsEBR, N>(config, PrefillStrategy::Decreasing),
@@ -332,38 +329,6 @@ impl PrefillStrategy {
                 for key in keys.drain(..) {
                     let value = key;
                     map.insert(key, value, guard);
-                }
-            }
-        }
-        print!("prefilled... ");
-        stdout().flush().unwrap();
-    }
-
-    fn prefill_pebr<M: ds_impl::pebr::ConcurrentMap<usize, usize> + Send + Sync>(
-        self,
-        config: &Config,
-        map: &M,
-    ) {
-        let guard = unsafe { crossbeam_pebr::unprotected() };
-        let mut handle = M::handle(guard);
-        let rng = &mut rand::thread_rng();
-        match self {
-            PrefillStrategy::Random => {
-                for _ in 0..config.prefill {
-                    let key = config.key_dist.sample(rng);
-                    let value = key;
-                    map.insert(&mut handle, key, value, guard);
-                }
-            }
-            PrefillStrategy::Decreasing => {
-                let mut keys = Vec::with_capacity(config.prefill);
-                for _ in 0..config.prefill {
-                    keys.push(config.key_dist.sample(rng));
-                }
-                keys.sort_by(|a, b| b.cmp(a));
-                for key in keys.drain(..) {
-                    let value = key;
-                    map.insert(&mut handle, key, value, guard);
                 }
             }
         }
@@ -738,132 +703,6 @@ fn bench_map_ebr<N: Unsigned>(
                     if ops % N::to_u64() == 0 {
                         drop(guard);
                         guard = handle.pin();
-                    }
-                }
-
-                ops_sender.send(ops).unwrap();
-            });
-        }
-    })
-    .unwrap();
-    println!("end");
-
-    let mut ops = 0;
-    for _ in 0..config.readers {
-        let local_ops = ops_receiver.recv().unwrap();
-        ops += local_ops;
-    }
-    let ops_per_sec = ops / config.interval;
-    let (peak_mem, avg_mem, garb_peak, garb_avg) = mem_receiver.recv().unwrap();
-    (ops_per_sec, peak_mem, avg_mem, garb_peak, garb_avg)
-}
-
-fn bench_map_pebr<N: Unsigned>(
-    config: &Config,
-    strategy: PrefillStrategy,
-) -> (u64, usize, usize, usize, usize) {
-    use ds_impl::pebr::ConcurrentMap;
-    let map = &ds_impl::pebr::HHSList::new();
-    strategy.prefill_pebr(config, map);
-
-    let collector = &crossbeam_pebr::Collector::new();
-
-    let barrier = &Arc::new(Barrier::new(
-        config.writers + config.readers + config.aux_thread,
-    ));
-    let (ops_sender, ops_receiver) = mpsc::channel();
-    let (mem_sender, mem_receiver) = mpsc::channel();
-
-    scope(|s| {
-        // sampling & interference thread
-        if config.aux_thread > 0 {
-            let mem_sender = mem_sender.clone();
-            s.spawn(move |_| {
-                let mut samples = 0usize;
-                let mut acc = 0usize;
-                let mut peak = 0usize;
-                let mut garb_acc = 0usize;
-                let mut garb_peak = 0usize;
-                barrier.clone().wait();
-
-                let start = Instant::now();
-                let mut next_sampling = start + config.sampling_period;
-                while start.elapsed() < config.duration {
-                    let now = Instant::now();
-                    if now > next_sampling {
-                        let allocated = config.mem_sampler.sample();
-                        samples += 1;
-
-                        acc += allocated;
-                        peak = max(peak, allocated);
-
-                        let garbages = crossbeam_pebr::GLOBAL_GARBAGE_COUNT.load(Ordering::Acquire);
-                        garb_acc += garbages;
-                        garb_peak = max(garb_peak, garbages);
-
-                        next_sampling = now + config.sampling_period;
-                    }
-                    std::thread::sleep(config.aux_thread_period);
-                }
-
-                if config.sampling {
-                    mem_sender
-                        .send((peak, acc / samples, garb_peak, garb_acc / samples))
-                        .unwrap();
-                } else {
-                    mem_sender.send((0, 0, 0, 0)).unwrap();
-                }
-            });
-        } else {
-            mem_sender.send((0, 0, 0, 0)).unwrap();
-        }
-
-        // Spawn writer threads.
-        for _ in 0..config.writers {
-            s.spawn(move |_| {
-                let mut ops: u64 = 0;
-                let handle = collector.register();
-                let mut map_handle = ds_impl::pebr::HHSList::handle(&handle.pin());
-                barrier.clone().wait();
-                let start = Instant::now();
-
-                let mut guard = handle.pin();
-                let mut acquired = None;
-                while start.elapsed() < config.duration {
-                    if let Some((key, value)) = acquired.take() {
-                        assert!(map.insert(&mut map_handle, key, value, &mut guard));
-                    } else {
-                        let (key, value) = map.pop(&mut map_handle, &mut guard).unwrap();
-                        acquired = Some((key.clone(), value.clone()));
-                    }
-                    ops += 1;
-                    if ops % N::to_u64() == 0 {
-                        ds_impl::pebr::HHSList::clear(&mut map_handle);
-                        guard.repin();
-                    }
-                }
-            });
-        }
-
-        // Spawn reader threads.
-        for _ in 0..config.readers {
-            let ops_sender = ops_sender.clone();
-            s.spawn(move |_| {
-                let mut ops: u64 = 0;
-                let rng = &mut rand::thread_rng();
-                let handle = collector.register();
-                let mut map_handle = ds_impl::pebr::HHSList::handle(&handle.pin());
-                barrier.clone().wait();
-                let start = Instant::now();
-
-                let mut guard = handle.pin();
-                while start.elapsed() < config.duration {
-                    let key = config.key_dist.sample(rng);
-                    let _ = map.get(&mut map_handle, &key, &mut guard);
-                    ops += 1;
-                    if ops % N::to_u64() == 0 {
-                        ds_impl::pebr::HHSList::clear(&mut map_handle);
-                        guard.repin();
                     }
                 }
 
