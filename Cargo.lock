@@ -381,6 +381,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "hp-epb"
+version = "0.1.0"
+dependencies = [
+ "crossbeam-utils 0.8.20",
+ "membarrier 0.2.3 (git+https://github.com/jeehoonkang/membarrier-rs.git?branch=smr-benchmark)",
+ "rand",
+ "rustc-hash",
+]
+
+[[package]]
 name = "hp_pp"
 version = "0.1.0"
 dependencies = [
@@ -817,6 +827,7 @@ dependencies = [
  "crossbeam-utils 0.8.20",
  "csv",
  "hp-brcu",
+ "hp-epb",
  "hp_pp",
  "nbr",
  "num",

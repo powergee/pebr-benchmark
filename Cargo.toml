@@ -1,5 +1,6 @@
 [workspace]
 members = [
+    "./smrs/hp-epb",
     "./smrs/hp-pp",
     "./smrs/nbr",
     "./smrs/cdrc",
@@ -27,6 +28,7 @@ rand = "0.8"
 typenum = "1.17"
 num = "0.4.3"
 hp_pp = { path = "./smrs/hp-pp" }
+hp-epb = { path = "./smrs/hp-epb" }
 nbr = { path = "./smrs/nbr" }
 cdrc = { path = "./smrs/cdrc" }
 hp-brcu = { path = "./smrs/hp-brcu" }
