@@ -9,7 +9,9 @@ use std::thread::available_parallelism;
 use std::time::Instant;
 
 use smr_benchmark::config::map::{setup, BenchWriter, Config, Op, Perf, DS};
-use smr_benchmark::ds_impl::circ_ebr::{ConcurrentMap, EFRBTree, HHSList, HList, HMList, HashMap};
+use smr_benchmark::ds_impl::circ_ebr::{
+    ConcurrentMap, EFRBTree, HHSList, HList, HMList, HashMap, NMTreeMap,
+};
 
 fn main() {
     let (config, output) = setup(
@@ -30,6 +32,7 @@ fn bench(config: &Config, output: BenchWriter) {
         DS::HHSList => bench_map::<HHSList<usize, usize>>(config, PrefillStrategy::Decreasing),
         DS::HashMap => bench_map::<HashMap<usize, usize>>(config, PrefillStrategy::Decreasing),
         DS::EFRBTree => bench_map::<EFRBTree<usize, usize>>(config, PrefillStrategy::Random),
+        DS::NMTree => bench_map::<NMTreeMap<usize, usize>>(config, PrefillStrategy::Random),
         _ => panic!("Unsupported(or unimplemented) data structure for CIRC"),
     };
     output.write_record(config, &perf);
